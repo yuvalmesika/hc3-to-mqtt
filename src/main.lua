@@ -12,7 +12,7 @@ Description:
 - Forked from alexander-vitishchenko/hc3-to-mqtt v1.0.235
 ]]--
 
-local QUICKAPP_VERSION = "1.0.235-fork-1"
+local QUICKAPP_VERSION = "1.0.235-fork-1-uv"
 local DEFAULT_HEARTBEAT_INTERVAL = 60
 local DEFAULT_RECONNECT_DELAY_MS = 10000
 local DEFAULT_KEEPALIVE = 60
@@ -88,16 +88,52 @@ function QuickApp:establishMqttConnection()
     end
     self:trace("MQTT URL: " .. sanitizeMqttUrl(mqttUrl))
 
-    local mqttClient = mqtt.Client.connect(
-                                    mqttUrl,
-                                    mqttConnectionParameters)
+    -- 1. Kill and clear the old client instance if it exists
+    if self.mqtt then
+        -- Wrap in pcall in case the old client is already totally destroyed
+        pcall(function() 
+            self.mqtt:disconnect() 
+        end)
+        self.mqtt = nil -- Clears the reference so Garbage Collection can run
+    end
+    -- Wrap connection in pcall to protect against hard crashes
+    local success, result = pcall(mqtt.Client.connect, mqttUrl, mqttConnectionParameters)
 
+    if not success then
+        self:error("Malformed URL or internal initialization crash: " .. tostring(result))
+        return
+    end
+
+    -- If successful, 'result' holds the actual mqttClient instance
+    local mqttClient = result
+
+    --local mqttClient = mqtt.Client.connect(
+    --                                mqttUrl,
+    --                                mqttConnectionParameters)
+    self:trace("MQTT connected set events:")
+
+
+    self.hc3ConnectionEnabled = false
+
+    -- 1. THE WATCHDOG: a custom timeout (e.g., 5 seconds)
+    fibaro.setTimeout(20000, function()
+        if not self.hc3ConnectionEnabled then
+            self:error("Watchdog Timeout: The IP " .. mqttUrl .. " is completely unreachable!")
+            -- Execute your fallback or reconnection scheduling here
+            self:handleConnectionFailure()
+        end
+    end)
     mqttClient:addEventListener('connected', function(event) self:onConnected(event) end)
     mqttClient:addEventListener('closed', function(event) self:onClosed(event) end)
     mqttClient:addEventListener('message', function(event) self:onMessage(event) end)
     mqttClient:addEventListener('error', function(event) self:onError(event) end)    
-    
+    self:trace("MQTT connected event added:")
     self.mqtt = mqttClient
+end
+function QuickApp:handleConnectionFailure()
+    -- Your logic for when the broker is dead (e.g., retry in 10 seconds)
+    self:scheduleReconnectToMqtt()
+    self:trace("Scheduling reconnection attempt...")
 end
 
 function QuickApp:getMqttConnectionParameters()
